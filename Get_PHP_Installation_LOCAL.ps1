@@ -1,95 +1,91 @@
-# Local-Only PHP Audit Script for DMZ / Workgroup Servers
-[CmdletBinding()]
-param(
-    [string]$ExportPath = "C:\Temp\PHP_Audit_$($env:COMPUTERNAME)_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-)
+<#
+.SYNOPSIS
+    Detects PHP installations and related web servers on Windows Server.
+.DESCRIPTION
+    Scans for active processes, services, PATH variables, and common directories
+    to help identify PHP installations vulnerable to CVE-2026-109618 & CVE-2026-109619 (PHP2Shell).
+#>
 
-$HostName =$env:COMPUTERNAME
-Write-Host "==================================================" -ForegroundColor Cyan
-Write-Host " Starting PHP Audit on Local Host: $HostName" -ForegroundColor Cyan
-Write-Host "==================================================" -ForegroundColor Cyan
-
-$Results = [System.Collections.Generic.List[PSObject]]::new()
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host " PHP Usage and Web Server Detection Tool (PHP2Shell Mitigation) " -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "Checking for active PHP processes, services, and common paths...`n"
 
 # 1. Check Running Processes
-Write-Host "[*] Checking running processes..." -ForegroundColor Gray
-$runningProc = Get-Process -Name "php*", "php-cgi*", "php-fpm*" -ErrorAction SilentlyContinue
-if ($runningProc) {
-    foreach ($proc in $runningProc) {$Results.Add([PSCustomObject]@{
-            Category    = "Running Process"
-            Path        = $proc.Path
-            Details     = "PID: $($proc.Id) | Process: $($proc.Name)"
-        })
-    }
+Write-Host "[*] Checking Running Processes..." -ForegroundColor Cyan
+$processNames = @("php", "php-cgi", "php-fpm", "httpd", "nginx", "w3wp")
+$activeProcesses = Get-Process -Name $processNames -ErrorAction SilentlyContinue | Select-Object Name, Id, Path
+
+if ($activeProcesses) {
+    Write-Host "Found potentially relevant processes (Check if these are serving PHP):" -ForegroundColor Yellow
+    $activeProcesses | Format-Table -AutoSize
+} else {
+    Write-Host "No active PHP or common web server processes found running.`n" -ForegroundColor Green
 }
 
-# 2. Check System/Machine PATH Environment Variables
-Write-Host "[*] Checking System PATH environment variables..." -ForegroundColor Gray
-$envPath = [Environment]::GetEnvironmentVariable("PATH", "Machine") -split ";"
-foreach ($path in$envPath) {
-    if ($path -and (Test-Path$path)) {
-        $phpInPath = Get-ChildItem -Path$path -Filter "php*.exe" -ErrorAction SilentlyContinue
-        foreach ($bin in $phpInPath) {$Results.Add([PSCustomObject]@{
-                Category    = "System PATH"
-                Path        = $bin.FullName
-                Details     = "Version: $(($bin.VersionInfo).FileVersion)"
-            })
-        }
-    }
+# 2. Check Windows Services
+Write-Host "[*] Checking Web Server Services (IIS, Apache, Nginx)..." -ForegroundColor Cyan
+$services = Get-Service -Name "W3SVC", "Apache*", "Nginx*" -ErrorAction SilentlyContinue
+
+if ($services) {
+    Write-Host "Found installed web server services:" -ForegroundColor Yellow
+    $services | Select-Object Name, DisplayName, Status | Format-Table -AutoSize
+} else {
+    Write-Host "No common web server services found.`n" -ForegroundColor Green
 }
 
-# 3. Search Common Directory Targets
-Write-Host "[*] Scanning standard PHP directory paths..." -ForegroundColor Gray
-$targetDirectories = @(
-    "C:\php",
-    "C:\Program Files\PHP",
-    "C:\Program Files (x86)\PHP",
-    "C:\inetpub",
-    "C:\xampp\php",
-    "C:\wamp64\bin\php",
-    "C:\wamp\bin\php",
-    "C:\Apache24"
+# 3. Check Environment Variables (PATH)
+Write-Host "[*] Checking System PATH for PHP..." -ForegroundColor Cyan
+$pathVar = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+$phpInPath = $pathVar -split ';' | Where-Object { $_ -match "php" }
+
+if ($phpInPath) {
+    Write-Host "PHP directories found in System PATH:" -ForegroundColor Yellow
+    $phpInPath | ForEach-Object { Write-Host " - $_" }
+    Write-Host ""
+} else {
+    Write-Host "PHP not found in System PATH.`n" -ForegroundColor Green
+}
+
+# 4. Check Common Default Installation Paths
+Write-Host "[*] Checking Common Installation Paths..." -ForegroundColor Cyan
+$commonPaths = @(
+    "C:\php\php.exe",
+    "C:\xampp\php\php.exe",
+    "C:\tools\php\php.exe",
+    "C:\Program Files\PHP\*\php.exe",
+    "C:\Program Files (x86)\PHP\*\php.exe"
 )
 
-foreach ($dir in$targetDirectories) {
-    if (Test-Path $dir) {
-        $foundBins = Get-ChildItem -Path$dir -Filter "php*.exe" -Recurse -ErrorAction SilentlyContinue
-        foreach ($bin in $foundBins) {$Results.Add([PSCustomObject]@{
-                Category    = "Directory Search"
-                Path        = $bin.FullName
-                Details     = "Version: $(($bin.VersionInfo).FileVersion)"
-            })
+$foundExecutables = @()
+foreach ($path in$commonPaths) {
+    # Resolve wildcards
+    $resolvedPaths = Resolve-Path -Path$path -ErrorAction SilentlyContinue
+    if ($resolvedPaths) {
+        $foundExecutables +=$resolvedPaths.Path
+    }
+}
+
+if ($foundExecutables) {
+    Write-Host "Found PHP executables in common locations:" -ForegroundColor Yellow
+    foreach ($exe in$foundExecutables) {
+        Write-Host " - $exe"
+        # Attempt to extract the PHP version
+        try {
+            $versionOutput = &$exe -v 2>&1
+            $versionLine = ($versionOutput -split "`n")[0]
+            Write-Host "   Version Info: $versionLine" -ForegroundColor Gray
+        } catch {
+            Write-Host "   [Could not execute to determine version]" -ForegroundColor Red
         }
     }
-}
-
-# 4. Check IIS Handler Mappings
-Write-Host "[*] Checking IIS Handler Mappings..." -ForegroundColor Gray
-if (Get-Module -ListAvailable -Name WebAdministration) {
-    Import-Module WebAdministration -ErrorAction SilentlyContinue
-    $phpHandlers = Get-WebConfigurationProperty -Filter 'system.webServer/handlers' -Name 'collection' -ErrorAction SilentlyContinue |
-                   Where-Object { $_.path -like '*.php*' -or$_.scriptProcessor -like '*php*' }
-    
-    foreach ($handler in $phpHandlers) {$Results.Add([PSCustomObject]@{
-            Category    = "IIS Handler"
-            Path        = $handler.scriptProcessor
-            Details     = "Handler Name: $($handler.name) | Route: $($handler.path)"
-        })
-    }
-}
-
-# Display & Export Output
-if ($Results.Count -gt 0) {
-    Write-Host "`n[!] DETECTED: PHP components found on $HostName:`n" -ForegroundColor Yellow
-    $Results | Format-Table -AutoSize
-    
-    # Save output log locally
-    $logDir = Split-Path $ExportPath
-    if (-not (Test-Path $logDir)) {
-        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    }
-    $Results | Out-File -FilePath $ExportPath
-    Write-Host "[+] Results exported to: $ExportPath" -ForegroundColor Green
 } else {
-    Write-Host "`n[+] CLEAN: No active PHP processes, binaries, or IIS handlers detected on $HostName." -ForegroundColor Green
+    Write-Host "No PHP executables found in standard default locations." -ForegroundColor Green
 }
+
+Write-Host "`n================================================================" -ForegroundColor Cyan
+Write-Host "Scan Complete."
+Write-Host "If PHP is found, verify if it serves web requests. To mitigate"
+Write-Host "CVE-2026-109618 and CVE-2026-109619, update immediately to:"
+Write-Host "PHP 8.5.12, 8.4.27, 8.3.36, or 8.2.35."
+Write-Host "================================================================" -ForegroundColor Cyan
