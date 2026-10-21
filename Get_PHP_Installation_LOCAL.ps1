@@ -58,9 +58,9 @@ $commonPaths = @(
 )
 
 $foundExecutables = @()
-foreach ($path in$commonPaths) {
+foreach ($path in $commonPaths) {
     # Resolve wildcards
-    $resolvedPaths = Resolve-Path -Path$path -ErrorAction SilentlyContinue
+    $resolvedPaths = Resolve-Path -Path $path -ErrorAction SilentlyContinue
     if ($resolvedPaths) {
         $foundExecutables +=$resolvedPaths.Path
     }
@@ -68,7 +68,7 @@ foreach ($path in$commonPaths) {
 
 if ($foundExecutables) {
     Write-Host "Found PHP executables in common locations:" -ForegroundColor Yellow
-    foreach ($exe in$foundExecutables) {
+    foreach ($exe in $foundExecutables) {
         Write-Host " - $exe"
         # Attempt to extract the PHP version
         try {
